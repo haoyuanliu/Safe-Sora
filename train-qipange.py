@@ -1,17 +1,29 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+# os.environ["CUDA_VISIBLE_DEVICES"]="1"
 import argparse
 import torch
+from torchvision.utils import save_image
 from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
 from tqdm import tqdm
 from utils.utils import adjust_learning_rate_no_warmup, set_seed
-from custom_modules import CustomVideoLatentDataset, EmbeddingNet, attack, RevealNet
+from custom_modules import CustomVideoLatentDataset, EmbeddingNet, attack, RevealNet, save_mul_video
 from Adaptive_Embedding import Adaptive_Embedding, revert_order
 import torch.distributed as dist 
 from utils.distributed import init_distributed_mode
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from utils import qipangeutil
+
+import logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    filename="app.log",
+    filemode="a" # 追加模式
+)
+
+logger = logging.getLogger("train-qipange")
 
 def get_parser():
     parser = argparse.ArgumentParser()
@@ -27,7 +39,7 @@ def get_parser():
     parser.add_argument("--use_ddp", action="store_true")
 
     parser.add_argument("--data_dir", default='data/Panda-70M-sampled-latent')
-    parser.add_argument("--logo_dir", default='data/logo-2k/train')
+    parser.add_argument("--logo_dir", default='data/qipange/train')
     parser.add_argument("--config_path", default="configs/inference_t2v_512_v2.0.yaml")
     parser.add_argument("--output_dir", default="./output")
 
@@ -147,11 +159,28 @@ for epoch in tqdm(range(1, args.epochs + 1), desc="Epochs", unit="epoch", ncols=
 
         adjust_learning_rate_no_warmup(optimizer, len(train_loader), batch_idx, epoch, args.epochs, args.lr, 0, 1e-6)
 
-        loss_wm = loss_fn(original_patches, watermark_and_pos)
         # 重新构造一个水印的loss function
+        origin_wm_bit, str_origin_wm_bit = qipangeutil.extract(logo_image, 0)
+        extracted_wm_bit, str_extracted_wm_bit = qipangeutil.extract(watermark, 0.1)
+        wm_bits_loss_fun = torch.nn.BCELoss(reduction='mean', reduce=True)
+        loss_wm_bits = wm_bits_loss_fun(extracted_wm_bit, origin_wm_bit)/len(origin_wm_bit)
+        # torch.nn.BCELoss(origin_wm_bit, extracted_wm_bit, reduce=True)/len(origin_wm_bit)
         
+        loss_wm = loss_fn(original_patches, watermark_and_pos)
         loss_video = loss_fn(reconst_video_w, reconst_video)
-        loss = loss_video + args.lambda_w * loss_wm
+        loss = loss_video + args.lambda_w * loss_wm + args.lambda_w * loss_wm_bits
+        
+        if batch_idx%200==0:
+            logger.info(f"Epoch [{epoch}/{args.epochs}] Batch [{batch_idx}/{len(train_loader)}] "
+                        f"Loss: {loss.item():.4f} "
+                        f"Loss_video: {loss_video.item():.4f} "
+                        f"Loss_wm: {loss_wm.item():.4f} "
+                        f"Loss_wm_bits: {loss_wm_bits.item():.4f} ")
+            logger.info(f"Original WM bits: {str_origin_wm_bit}")
+            logger.info(f"Extracted WM bits: {str_extracted_wm_bit}") 
+            save_image(watermark, os.path.join("results", f"watermark_epoch{epoch}_batch{batch_idx}.png"))
+            save_mul_video([video, reconst_video_w, abs(video - reconst_video_w) * 5], os.path.join('results',   
+                            f"video_epoch{epoch}_batch{batch_idx}.mp4"))
         
         total_step = (epoch - 1) * len(train_loader) + batch_idx
 

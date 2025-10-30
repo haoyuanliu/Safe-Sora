@@ -7,7 +7,7 @@ if [ "$GPU_COUNT" -gt 1 ]; then
     torchrun \
     --nproc_per_node=$GPU_COUNT \
     --master_port=12357 \
-    train.py --use_ddp
+    train_qipange.py --use_ddp
 else
     echo "Using single-GPU training with GPU: $CUDA_VISIBLE_DEVICES"
     python train.py
