@@ -1,17 +1,28 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="2"
+# os.environ["CUDA_VISIBLE_DEVICES"]="2"
 import argparse
 import torch
+from torchvision.utils import save_image
 from torch.utils.data import DataLoader
 from omegaconf import OmegaConf
 from tqdm import tqdm
 from utils.utils import adjust_learning_rate_no_warmup, set_seed
-from custom_modules import CustomVideoLatentDataset, EmbeddingNet, attack, RevealNet
+from custom_modules import CustomVideoLatentDataset, EmbeddingNet, attack, RevealNet, save_mul_video
 from Adaptive_Embedding import Adaptive_Embedding, revert_order
 import torch.distributed as dist 
 from utils.distributed import init_distributed_mode
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+import logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    filename="app-origin.log",
+    filemode="a" # 追加模式
+)
+
+logger = logging.getLogger("train")
 
 def get_parser():
     parser = argparse.ArgumentParser()
@@ -29,7 +40,7 @@ def get_parser():
     parser.add_argument("--data_dir", default='data/Panda-70M-sampled-latent')
     parser.add_argument("--logo_dir", default='data/logo-2k/train')
     parser.add_argument("--config_path", default="configs/inference_t2v_512_v2.0.yaml")
-    parser.add_argument("--output_dir", default="./output")
+    parser.add_argument("--output_dir", default="./output-origin")
 
     parser.add_argument("--log_interval", type=int, default=1) 
     parser.add_argument("--save_interval", type=int, default=10) 
@@ -152,6 +163,17 @@ for epoch in tqdm(range(1, args.epochs + 1), desc="Epochs", unit="epoch", ncols=
         
         loss_video = loss_fn(reconst_video_w, reconst_video)
         loss = loss_video + args.lambda_w * loss_wm
+        
+        total_step = (epoch - 1) * len(train_loader) + batch_idx
+        
+        logger.info(f"Epoch [{epoch}/{args.epochs}] Batch [{batch_idx}/{len(train_loader)}] "
+                    f"Loss: {loss.item():.4f} "
+                    f"Loss_video: {loss_video.item():.4f} "
+                    f"Loss_wm: {loss_wm.item():.4f} ")
+        if batch_idx%200==0:
+            save_image(watermark, os.path.join("results-origin", f"watermark_epoch{epoch}_batch{batch_idx}.png"))
+            save_mul_video([reconst_video, reconst_video_w, abs(reconst_video - reconst_video_w) * 5], os.path.join('results-origin',   
+                            f"video_epoch{epoch}_batch{batch_idx}.mp4"))
         
         total_step = (epoch - 1) * len(train_loader) + batch_idx
 
